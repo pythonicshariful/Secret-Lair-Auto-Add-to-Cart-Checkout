@@ -1,17 +1,117 @@
 // ==UserScript==
 // @name         Secret Lair Auto Add to Cart & Checkout
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.3
 // @description  Auto select quantity, add to cart, and proceed to checkout for Secret Lair with a beautiful UI.
 // @author       Antigravity
 // @match        https://secretlair.wizards.com/*/product/*
 // @match        https://secretlair.wizards.com/*/cart*
+// @match        https://checkoutshopper-live.adyen.com/*
 // @grant        GM_addStyle
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @grant        unsafeWindow
 // ==/UserScript==
 
 (function() {
     'use strict';
+
+    // ============================================================
+    // --- ADYEN IFRAME HANDLER (runs inside each Adyen iframe) ---
+    // ============================================================
+    if (window.location.hostname.includes('checkoutshopper') || window.location.hostname.includes('adyen.com')) {
+        const urlParams = new URLSearchParams(window.location.search);
+        const fieldType = urlParams.get('type') || '';
+
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+        // Type a string character by character into a real input element
+        async function typeIntoInput(input, value) {
+            input.focus();
+            // Clear existing value
+            input.value = '';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            await sleep(80);
+
+            for (const char of value) {
+                const keyCode = char.charCodeAt(0);
+                const keyInit = { key: char, code: `Digit${char}`, keyCode, which: keyCode, bubbles: true, cancelable: true };
+                input.dispatchEvent(new KeyboardEvent('keydown',  keyInit));
+                input.dispatchEvent(new KeyboardEvent('keypress', keyInit));
+                input.value += char;
+                input.dispatchEvent(new Event('input',  { bubbles: true }));
+                input.dispatchEvent(new KeyboardEvent('keyup',    keyInit));
+                await sleep(40 + Math.floor(Math.random() * 30));
+            }
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        async function waitForInput(selector, timeout = 10000) {
+            const start = Date.now();
+            while (Date.now() - start < timeout) {
+                const el = document.querySelector(selector);
+                if (el) return el;
+                await sleep(200);
+            }
+            return null;
+        }
+
+        async function runAdyenFiller() {
+            // All Adyen iframes share type=card in the URL.
+            // Detect which field this iframe hosts by checking what input is in the DOM.
+            const fieldMap = [
+                {
+                    inputSel: '#encryptedCardNumber, input[data-fieldtype="encryptedCardNumber"]',
+                    storedKey: 'sl_card_number'
+                },
+                {
+                    inputSel: '#encryptedExpiryDate, input[data-fieldtype="encryptedExpiryDate"]',
+                    storedKey: 'sl_card_expiry'
+                },
+                {
+                    inputSel: '#encryptedSecurityCode, input[data-fieldtype="encryptedSecurityCode"]',
+                    storedKey: 'sl_card_cvv'
+                },
+            ];
+
+            // Wait for any of the known inputs to appear in this iframe
+            let matched = null;
+            const detectDeadline = Date.now() + 8000;
+            while (!matched && Date.now() < detectDeadline) {
+                for (const entry of fieldMap) {
+                    if (document.querySelector(entry.inputSel)) {
+                        matched = entry;
+                        break;
+                    }
+                }
+                if (!matched) await sleep(200);
+            }
+            if (!matched) return; // not a known field iframe
+
+            // Poll for the stored value — parent sets it when payment step is reached
+            let value = null;
+            const deadline = Date.now() + 90000; // wait up to 90 seconds
+            while (!value && Date.now() < deadline) {
+                value = await GM_getValue(matched.storedKey, null);
+                if (!value) await sleep(500);
+            }
+            if (!value) return;
+
+            // Get the input (should already be there since we detected it above)
+            const input = document.querySelector(matched.inputSel);
+            if (!input) return;
+
+            await sleep(300);
+            await typeIntoInput(input, value);
+
+            // Clear the stored value so it doesn't re-fill on future page loads
+            await GM_setValue(matched.storedKey, null);
+        }
+
+        runAdyenFiller();
+        return; // Don't run the main bot UI inside Adyen iframes
+    }
+    // ============================================================
 
     const isCartPage = /\/cart\b/i.test(window.location.pathname);
     const isProductPage = /\/product\//i.test(window.location.pathname);
@@ -120,6 +220,51 @@
         #sl-bot-console::-webkit-scrollbar { width: 5px; }
         #sl-bot-console::-webkit-scrollbar-track { background: transparent; }
         #sl-bot-console::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 3px; }
+        #sl-payment-alert {
+            display: none;
+            margin: 0 16px 14px;
+            background: linear-gradient(135deg, rgba(251,191,36,0.18) 0%, rgba(245,158,11,0.1) 100%);
+            border: 1px solid rgba(251,191,36,0.45);
+            border-radius: 10px;
+            padding: 11px 14px;
+            font-size: 12px;
+            color: #fde68a;
+            line-height: 1.5;
+            animation: sl-pulse 1.6s ease-in-out infinite;
+        }
+        @keyframes sl-pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,0.0); }
+            50% { box-shadow: 0 0 0 6px rgba(251,191,36,0.15); }
+        }
+        .sl-card-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        .sl-input-group input[type="text"] {
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 8px;
+            padding: 10px;
+            color: white;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s;
+            width: 100%;
+            box-sizing: border-box;
+            letter-spacing: 0.5px;
+        }
+        .sl-input-group input[type="text"]:focus {
+            border-color: #f59e0b;
+        }
+        .sl-section-label {
+            font-size: 10px;
+            color: rgba(251,191,36,0.7);
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: -4px;
+        }
     `);
 
     // --- Build UI ---
@@ -144,12 +289,28 @@
                 <label>Cart Automation</label>
                 <div style="font-size: 13px; color: #93c5fd;">Automatic checkout in progress...</div>
             </div>
-            <button id="sl-bot-start">Click Secure Checkout</button>
+            <div class="sl-section-label">💳 Card Details (auto-filled at payment)</div>
+            <div class="sl-input-group">
+                <label>Card Number</label>
+                <input type="text" id="sl-card-number" placeholder="1234 5678 9012 3456" maxlength="19" autocomplete="cc-number">
+            </div>
+            <div class="sl-card-row">
+                <div class="sl-input-group">
+                    <label>Expiry (MM/YY)</label>
+                    <input type="text" id="sl-card-expiry" placeholder="MM/YY" maxlength="5" autocomplete="cc-exp">
+                </div>
+                <div class="sl-input-group">
+                    <label>CVV</label>
+                    <input type="text" id="sl-card-cvv" placeholder="123" maxlength="4" autocomplete="cc-csc">
+                </div>
+            </div>
+            <button id="sl-bot-start">Start Auto-Checkout</button>
             `}
         </div>
         <div id="sl-bot-console">
             <span class="log-info">[Ready] Initialized on ${isCartPage ? 'Cart' : 'Product'} page.</span>
         </div>
+        <div id="sl-payment-alert">💳 <strong>Payment step reached!</strong><br>Your browser autofill should activate. Click the card number field and select your saved card, then hit <strong>Pay</strong>.</div>
     `;
     document.body.appendChild(container);
 
@@ -251,43 +412,127 @@
         element.click();
     }
 
+    // --- Detect Adyen payment iframe ---
+    function isOnPaymentStep() {
+        return !!document.querySelector('iframe[src*="checkoutshopper"], iframe[src*="adyen"]');
+    }
+
+    // --- Signal Adyen iframes with card data via GM_setValue ---
+    async function fillCardDetails() {
+        const paymentAlert = document.getElementById('sl-payment-alert');
+        if (paymentAlert) paymentAlert.style.display = 'block';
+
+        const cardNumber = (document.getElementById('sl-card-number')?.value || '').replace(/\s/g, '');
+        const cardExpiry = document.getElementById('sl-card-expiry')?.value || '';
+        const cardCvv    = document.getElementById('sl-card-cvv')?.value || '';
+
+        if (!cardNumber && !cardExpiry && !cardCvv) {
+            log('⚠️ No card details entered in the bot panel.', 'warn');
+            return;
+        }
+
+        // Store values — the Adyen iframe scripts will pick these up and type them in
+        if (cardNumber) await GM_setValue('sl_card_number', cardNumber);
+        if (cardExpiry) await GM_setValue('sl_card_expiry', cardExpiry);
+        if (cardCvv)    await GM_setValue('sl_card_cvv',    cardCvv);
+
+        log('💳 Card data sent to payment fields...', 'info');
+
+        // Scroll to and click each iframe to trigger it to load & start the filler.
+        // Use data-cse on the wrapper div since all Adyen iframe srcs share type=card.
+        const iframeSelectors = [
+            { sel: '[data-cse="encryptedCardNumber"] iframe, [data-internal-id*="cardNumber"] iframe',       label: 'Card Number' },
+            { sel: '[data-cse="encryptedExpiryDate"] iframe, [data-internal-id*="expiryDate"] iframe',       label: 'Expiry Date' },
+            { sel: '[data-cse="encryptedSecurityCode"] iframe, [data-internal-id*="securityCode"] iframe',   label: 'CVV' },
+        ];
+
+        // Fallback: if data-cse wrappers not found, grab all Adyen iframes in order
+        let foundAny = iframeSelectors.some(({ sel }) => !!document.querySelector(sel));
+        if (!foundAny) {
+            const allIframes = Array.from(document.querySelectorAll('iframe[src*="checkoutshopper"]'));
+            iframeSelectors.forEach((entry, i) => {
+                if (allIframes[i]) entry.fallbackEl = allIframes[i];
+            });
+        }
+
+        const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        for (const { sel, label, fallbackEl } of iframeSelectors) {
+            const iframe = document.querySelector(sel) || fallbackEl || null;
+            if (!iframe) { log(`⚠️ ${label} iframe not found.`, 'warn'); continue; }
+            iframe.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            await sleep(500);
+            const rect = iframe.getBoundingClientRect();
+            const cx = rect.left + 20 + Math.random() * 8;
+            const cy = rect.top  + 18 + Math.random() * 6;
+            const opts = { bubbles: true, cancelable: true, view: win, clientX: cx, clientY: cy };
+            iframe.dispatchEvent(new MouseEvent('mousedown', opts));
+            await sleep(80);
+            iframe.dispatchEvent(new MouseEvent('mouseup',   opts));
+            iframe.dispatchEvent(new MouseEvent('click',     opts));
+            log(`Triggered ${label} iframe.`, 'info');
+            await sleep(1200); // give the iframe filler time to type
+        }
+
+        log('✅ Card details sent! Check the fields and click Pay.', 'success');
+    }
+
     // --- Cart Page Automation ---
     async function runCartCheckout() {
         startBtn.disabled = true;
         startBtn.textContent = 'Processing...';
-        log('Cart page detected. Searching for Secure Checkout button...', 'info');
+        log('Cart page detected. Searching for checkout/payment buttons...', 'info');
 
         let attempts = 0;
-        const maxAttempts = 30; // 15 seconds max
+        const maxAttempts = 120; // 60 seconds max
+        let paymentHandled = false;
 
         while (attempts < maxAttempts) {
             await sleep(500);
 
-            // Locate checkout button with multiple selector fallbacks
-            const checkoutBtn = document.querySelector('button[data-internal-id="cart-continue"], button[ng-click*="setNextPage"], button[ng-click*="checkCPF"]');
+            // --- Check if we have landed on the payment step ---
+            if (!paymentHandled && isOnPaymentStep()) {
+                paymentHandled = true;
+                await fillCardDetails();
+                startBtn.disabled = false;
+                startBtn.textContent = 'Automating Payment...';
+                // Do NOT break; we want to continue and click Review Order once enabled
+            }
+
+            // Locate all checkout buttons with multiple selector fallbacks (including the Review Order button)
+            const checkoutBtns = document.querySelectorAll('button[data-internal-id="cart-continue"], button[data-internal-id="cart-continue-creditcard"], button[ng-click*="setNextPage"], button[ng-click*="checkCPF"]');
             
-            if (checkoutBtn) {
+            let activeBtn = null;
+            for (const btn of checkoutBtns) {
+                if (btn.offsetWidth > 0 || btn.offsetHeight > 0) {
+                    activeBtn = btn;
+                    break;
+                }
+            }
+
+            if (activeBtn) {
                 // Check if button is enabled
-                const isDisabled = checkoutBtn.disabled || 
-                                   checkoutBtn.classList.contains('disabled') || 
-                                   checkoutBtn.getAttribute('disabled') !== null ||
-                                   checkoutBtn.getAttribute('aria-disabled') === 'true';
+                const isDisabled = activeBtn.disabled || 
+                                   activeBtn.classList.contains('disabled') || 
+                                   activeBtn.getAttribute('disabled') !== null ||
+                                   activeBtn.getAttribute('aria-disabled') === 'true';
 
                 if (!isDisabled) {
-                    log('Secure Checkout button is ready! Clicking...', 'info');
-                    checkoutBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    const btnText = activeBtn.textContent.trim() || 'Next Button';
+                    log(`"${btnText}" is ready! Clicking...`, 'info');
+                    activeBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
                     await sleep(350);
-                    await simulateHumanClick(checkoutBtn);
-                    log('Secure Checkout clicked successfully!', 'success');
-                    startBtn.textContent = 'Checkout Clicked';
-                    return;
+                    await simulateHumanClick(activeBtn);
+                    log(`"${btnText}" clicked successfully!`, 'success');
+                    
+                    // Wait for the next view to render
+                    await sleep(2000);
                 } else {
-                    if (attempts % 4 === 0) {
-                        log('Waiting for cart to load and button to enable...', 'info');
+                    if (attempts % 10 === 0) {
+                        log('Waiting for cart/payment button to enable...', 'info');
                     }
                 }
             } else {
-                if (attempts % 4 === 0) {
+                if (attempts % 10 === 0) {
                     log('Locating checkout button on page...', 'info');
                 }
             }
@@ -302,9 +547,11 @@
             attempts++;
         }
 
-        log('Could not click Secure Checkout button within timeout.', 'error');
-        startBtn.disabled = false;
-        startBtn.textContent = 'Retry Secure Checkout';
+        if (!paymentHandled) {
+            log('Cart automation finished or timed out.', 'info');
+            startBtn.disabled = false;
+            startBtn.textContent = 'Retry Secure Checkout';
+        }
     }
 
     // --- Product Page Automation ---
