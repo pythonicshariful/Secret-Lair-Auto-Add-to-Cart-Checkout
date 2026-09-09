@@ -14,10 +14,10 @@
 // @run-at       document-idle
 // ==/UserScript==
 
-/* SECURITY: No passwords, payment data, auth tokens, or cookies are
+/* SECURITY: No passwords, auth tokens, or cookies are
    ever stored, logged, or transmitted by this script.
-   Card details entered in the panel pass to Adyen iframes only via
-   GM_setValue (same browser session) and are immediately cleared. */
+   Card details entered in the panel are saved locally in the browser via
+   localStorage (user opted-in). */
 
 (function () {
     'use strict';
@@ -37,12 +37,23 @@
             await sleep(80);
             for (const char of value) {
                 const kc = char.charCodeAt(0);
-                const ki = { key: char, code: 'Key' + char, keyCode: kc, which: kc, bubbles: true, cancelable: true };
-                input.dispatchEvent(new KeyboardEvent('keydown',  ki));
-                input.dispatchEvent(new KeyboardEvent('keypress', ki));
+                
+                // Adyen's checkout script proxies KeyboardEvent and breaks new KeyboardEvent() with Reflect.construct errors.
+                // We fallback to standard events with patched properties
+                const keydown = new Event('keydown', { bubbles: true, cancelable: true });
+                Object.assign(keydown, { key: char, code: 'Key' + char, keyCode: kc, which: kc });
+                
+                const keypress = new Event('keypress', { bubbles: true, cancelable: true });
+                Object.assign(keypress, { key: char, code: 'Key' + char, keyCode: kc, which: kc });
+                
+                const keyup = new Event('keyup', { bubbles: true, cancelable: true });
+                Object.assign(keyup, { key: char, code: 'Key' + char, keyCode: kc, which: kc });
+
+                input.dispatchEvent(keydown);
+                input.dispatchEvent(keypress);
                 input.value += char;
                 input.dispatchEvent(new Event('input', { bubbles: true }));
-                input.dispatchEvent(new KeyboardEvent('keyup', ki));
+                input.dispatchEvent(keyup);
                 await sleep(40 + Math.floor(Math.random() * 30));
             }
             input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -127,6 +138,7 @@
         discordWebhook: '', discordEnabled: false,
         telegramToken: '', telegramChatId: '', telegramEnabled: false,
         pushoverUserKey: '', pushoverApiToken: '', pushoverEnabled: false,
+        cardNumber: '', cardExpiry: '', cardCvv: '',
     };
 
     const Store = {
@@ -794,19 +806,17 @@
             const pa=document.getElementById('sl-payment-alert');
             if(pa){pa.style.display='block';pa.classList.add('active');}
             if(!num&&!exp&&!cvv){Log.warn('No card details entered.');return;}
-            if(num)await GM_setValue('sl_card_number',num);
-            if(exp)await GM_setValue('sl_card_expiry',exp);
-            if(cvv)await GM_setValue('sl_card_cvv',cvv);
-            Log.info('Card data forwarded to payment iframes.');
+            Log.info('Forwarding card data sequentially...');
             const groups=[
-                {sel:'[data-cse="encryptedCardNumber"] iframe',   label:'Card Number'},
-                {sel:'[data-cse="encryptedExpiryDate"] iframe',   label:'Expiry'},
-                {sel:'[data-cse="encryptedSecurityCode"] iframe', label:'CVV'},
+                {sel:'[data-cse="encryptedCardNumber"] iframe',   label:'Card Number', key: 'sl_card_number', val: num},
+                {sel:'[data-cse="encryptedExpiryDate"] iframe',   label:'Expiry', key: 'sl_card_expiry', val: exp},
+                {sel:'[data-cse="encryptedSecurityCode"] iframe', label:'CVV', key: 'sl_card_cvv', val: cvv},
             ];
             let any=groups.some(g=>!!document.querySelector(g.sel));
             if(!any){const all=Array.from(document.querySelectorAll('iframe[src*="checkoutshopper"]'));groups.forEach((g,i)=>{if(all[i])g.fb=all[i];});}
             const win=typeof unsafeWindow!=='undefined'?unsafeWindow:window;
             for(const g of groups){
+                if(!g.val) continue;
                 const iframe=document.querySelector(g.sel)||g.fb||null;
                 if(!iframe){Log.warn(g.label+' iframe not found.');continue;}
                 iframe.scrollIntoView({behavior:'smooth',block:'center'});
@@ -817,8 +827,16 @@
                 iframe.dispatchEvent(new MouseEvent('mousedown',o));await sleep(80);
                 iframe.dispatchEvent(new MouseEvent('mouseup',o));
                 iframe.dispatchEvent(new MouseEvent('click',o));
-                Log.info('Triggered '+g.label+' iframe.');
-                await sleep(1200);
+                Log.info('Triggered '+g.label+' iframe. Typing...');
+                
+                await GM_setValue(g.key, g.val);
+                
+                let waitIters = 0;
+                while (await GM_getValue(g.key, null) !== null && waitIters < 40) {
+                    await sleep(200);
+                    waitIters++;
+                }
+                await sleep(500);
             }
             Log.success('Card details sent. Check fields and click Pay.');
         },
@@ -1257,7 +1275,7 @@
     <div class="sl-man-warn">&#x1F6AB; Do NOT close the tab while in queue. Your position is lost if you do.</div>
 
     <div class="sl-man-h2">&#x1F4B3; Payment Auto-Fill</div>
-    <div class="sl-man-p">Card details entered in the <strong>Purchase tab</strong> are held in memory only. When Adyen payment iframes appear, the bot types each field with realistic keystrokes. Details are cleared immediately after use &mdash; never saved to disk.</div>
+    <div class="sl-man-p">Card details entered in the <strong>Purchase tab</strong> are saved locally in your browser so you don't have to re-enter them. When Adyen payment iframes appear, the bot types each field with realistic keystrokes.</div>
 
     <div class="sl-man-h2">&#x1F514; Notification Channels</div>
     <div class="sl-man-h3">Discord Webhook</div>
@@ -1343,6 +1361,7 @@
             s.discordEnabled=gc('s-discord-en');s.discordWebhook=g('s-discord-url');
             s.telegramEnabled=gc('s-tg-en');s.telegramToken=g('s-tg-token');s.telegramChatId=g('s-tg-chatid');
             s.pushoverEnabled=gc('s-po-en');s.pushoverUserKey=g('s-po-user');s.pushoverApiToken=g('s-po-token');
+            s.cardNumber=g('sl-card-number');s.cardExpiry=g('sl-card-expiry');s.cardCvv=g('sl-card-cvv');
             Store.saveSettings(s);
             const b=document.getElementById('sl-badge');if(b)b.textContent=s.purchaseMode==='auto'?'FULL-AUTO':'SEMI-AUTO';
             const dm=document.getElementById('d-mode');if(dm)dm.textContent=s.purchaseMode==='auto'?'Automatic':'Semi-Auto';
@@ -1361,6 +1380,7 @@
             sc('s-discord-en',s.discordEnabled||false);sv('s-discord-url',s.discordWebhook||'');
             sc('s-tg-en',s.telegramEnabled||false);sv('s-tg-token',s.telegramToken||'');sv('s-tg-chatid',s.telegramChatId||'');
             sc('s-po-en',s.pushoverEnabled||false);sv('s-po-user',s.pushoverUserKey||'');sv('s-po-token',s.pushoverApiToken||'');
+            sv('sl-card-number',s.cardNumber||'');sv('sl-card-expiry',s.cardExpiry||'');sv('sl-card-cvv',s.cardCvv||'');
             const b=document.getElementById('sl-badge');if(b)b.textContent=s.purchaseMode==='auto'?'FULL-AUTO':'SEMI-AUTO';
             const pm=document.getElementById('p-toggle-mon');if(pm)pm.textContent=s.monitorEnabled?'Disable Monitor':'Enable Monitor';
         },
