@@ -120,7 +120,7 @@
         keywords: '', ignoreList: '',
         desiredQty: 1, maxQty: 1,
         purchaseMode: 'semi', requireConfirmation: true,
-        queueMonitor: true, debugLogging: false,
+        queueMonitor: true, debugLogging: false, botActive: false,
         notifyNewProduct: true, notifyRestock: true, notifyQueue: true,
         notifyCheckout: true, notifyPurchase: true, notifyError: true,
         // External notification channels
@@ -780,7 +780,10 @@
         },
         async nextBtn(){
             const sels=['button[data-internal-id="cart-continue"]','button[data-internal-id="cart-continue-creditcard"]','button[ng-click*="setNextPage"]','button[ng-click*="checkCPF"]','button[ng-click*="placeOrder"]'];
-            for(const s of sels){const b=document.querySelector(s);if(b&&visible(b))return b;}
+            for(const s of sels){
+                const nodes=Array.from(document.querySelectorAll(s));
+                for(const b of nodes){if(b&&visible(b))return b;}
+            }
             return null;
         },
         setWaiting(p){this._waiting=true;this._product=p;},
@@ -834,6 +837,7 @@
             if(this._running){Log.warn('Bot already running.');return;}
             this._stop=false;this._running=true;
             const s=Store.settings();
+            s.botActive=true;Store.saveSettings(s);
             Log.info('Bot started.');
             if(isQueueItPage||document.querySelector(SEL.queueIframe)){
                 this._set('waiting');Log.queue('Queue-it detected.');Queue.startMon();return;
@@ -845,6 +849,8 @@
         },
         stop(){
             this._stop=true;this._running=false;
+            const s=Store.settings();
+            s.botActive=false;Store.saveSettings(s);
             Monitor.stop();Queue.stopMon();Checkout.clearWaiting();
             this._set('stopped');Log.info('Bot stopped.');
         },
@@ -864,7 +870,7 @@
         },
         onQueueDone(){Log.queue('Queue done - resuming cart flow.');this._set('purchasing');this._cartFlow();},
         confirm(){if(!Checkout.waiting())return;const p=Checkout.pending();Checkout.clearWaiting();this._set('purchasing');Log.purchase('User confirmed: '+(p&&p.name));location.href='https://secretlair.wizards.com/'+getLocale()+'/cart';},
-        cancel(){Checkout.clearWaiting();this._set('monitoring');Log.info('Purchase cancelled by user.');},
+        cancel(){Checkout.clearWaiting();this._set('monitoring');const s=Store.settings();s.botActive=false;Store.saveSettings(s);Log.info('Purchase cancelled by user.');},
         async _productFlow(){
             if(this._stop)return;
             const s=Store.settings();
@@ -901,7 +907,7 @@
             let paid=false,iters=0;
             while(iters<240&&!this._stop){
                 await sleep(500);
-                if(Checkout.orderConfirmed()){Log.purchase('Order confirmed!');Notify.fire('purchased');this._set('stopped');break;}
+                if(Checkout.orderConfirmed()){Log.purchase('Order confirmed!');Notify.fire('purchased');this.stop();break;}
                 if(!paid&&Checkout.onPaymentStep()){
                     paid=true;
                     const cn=((document.getElementById('sl-card-number')||{}).value||'').replace(/\s/g,'');
@@ -1361,7 +1367,7 @@
 
         _tick(){
             const auth=document.querySelector(SEL.signIn);
-            const in_=!auth||getComputedStyle(auth).display==='none'||!auth.offsetWidth;
+            const in_=!auth;
             const ae=document.getElementById('d-account');
             if(ae){ae.textContent=in_?'Connected':'Logged Out';ae.className='sl-rv '+(in_?'g':'r');}
             const pe=document.getElementById('d-page');
@@ -1448,8 +1454,13 @@
         UI._applySettings();
         Log.info('Bot v2.0.0 initialized on '+(isProductPage?'Product':isCartPage?'Cart':isCatalogPage?'Catalog':isQueueItPage?'Queue-it':'Other')+' page.');
         if(isQueueItPage){Log.queue('Queue-it page detected.');Queue.startMon();Bot._set('waiting');return;}
-        if(s.monitorEnabled){Bot._set('monitoring');Monitor.start();}
-        if(isCartPage)Log.info('Cart page ready. Click Start Bot to begin automated checkout.');
+        if(s.botActive){
+            Log.info('Resuming bot state from previous page...');
+            Bot.start();
+        }else if(s.monitorEnabled){
+            Bot._set('monitoring');Monitor.start();
+        }
+        if(isCartPage&&!s.botActive)Log.info('Cart page ready. Click Start Bot to begin automated checkout.');
         new MutationObserver(()=>{
             if(location.hostname.includes('queue-it.net')&&!Queue.inQueue()){Log.queue('Queue-it redirect!');Queue.startMon();Bot._set('waiting');}
         }).observe(document.documentElement,{childList:true,subtree:true});
