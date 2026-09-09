@@ -115,7 +115,7 @@
     // STORAGE MANAGER
     // ============================================================
     const DEFAULT_SETTINGS = {
-        monitorEnabled: false, checkIntervalSec: 30,
+        monitorEnabled: false, minIntervalSec: 25, maxIntervalSec: 45,
         detectNewProducts: true, detectRestocks: true,
         keywords: '', ignoreList: '',
         desiredQty: 1, maxQty: 1,
@@ -578,16 +578,27 @@
         start() {
             if (this._tid) return;
             const s = Store.settings();
-            const ms = Math.max(10, s.checkIntervalSec) * 1000;
-            Log.info('Release monitor started (catalog scan every ' + s.checkIntervalSec + 's, targeted watches every 8s)');
-            this._scan(); this._tid = setInterval(() => this._scan(), ms);
+            Log.info('Release monitor started (random delay ' + s.minIntervalSec + '-' + s.maxIntervalSec + 's, targeted watches 8s)');
+            this._scheduleNext(0);
         },
         stop() {
-            if (this._tid) { clearInterval(this._tid); this._tid = null; }
+            if (this._tid) { clearTimeout(this._tid); this._tid = null; }
             // Stop all targeted watchers
             Object.values(this._watchList).forEach(stop => stop());
             this._watchList = {};
             Log.info('Release monitor stopped.');
+        },
+        _scheduleNext(ms) {
+            this._tid = setTimeout(async () => {
+                await this._scan();
+                if (this.running()) {
+                    const s = Store.settings();
+                    const min = Math.max(10, s.minIntervalSec) * 1000;
+                    const max = Math.max(min, s.maxIntervalSec) * 1000;
+                    const nextMs = Math.floor(Math.random() * (max - min + 1)) + min;
+                    this._scheduleNext(nextMs);
+                }
+            }, ms);
         },
         running() { return !!this._tid; },
         now()     { this._scan(); },
@@ -1097,7 +1108,11 @@
       <div class="sl-row"><span class="sl-rl">New Releases</span><span class="sl-rv g" id="p-new">0</span></div>
       <div class="sl-row"><span class="sl-rl">Last Scan</span><span class="sl-rv" id="p-last">Never</span></div>
     </div>
-    <div class="sl-ig"><label>Check Interval (sec)</label><input type="number" class="sl-in" id="p-interval" min="5" value="30"></div>
+    <div style="font-size:10px;color:#64748b;margin-bottom:6px">Bot picks a random delay between Min and Max for each scan.</div>
+    <div class="sl-g2" style="margin-bottom:8px">
+      <div class="sl-ig"><label>Min Interval (sec) <span style="font-weight:400;text-transform:none;color:#94a3b8">(Rec: 25)</span></label><input type="number" class="sl-in" id="p-min-int" min="10" value="25"></div>
+      <div class="sl-ig"><label>Max Interval (sec) <span style="font-weight:400;text-transform:none;color:#94a3b8">(Rec: 45)</span></label><input type="number" class="sl-in" id="p-max-int" min="10" value="45"></div>
+    </div>
     <div class="sl-cb"><input type="checkbox" id="p-dnew" checked><span>Detect New Products</span></div>
     <div class="sl-cb"><input type="checkbox" id="p-drestock" checked><span>Detect Restocks</span></div>
     <div class="sl-ig"><label>Keywords (comma-separated)</label><input type="text" class="sl-in" id="p-kw" placeholder="foil, marvel, lofi"></div>
@@ -1309,7 +1324,8 @@
             const gc=id=>{const e=document.getElementById(id);return e?e.checked:false;};
             const gi=(id,d)=>{const v=parseInt(g(id));return isNaN(v)?d:v;};
             const s=Store.settings();
-            s.checkIntervalSec=Math.max(5,gi('p-interval',30));
+            s.minIntervalSec=Math.max(10,gi('p-min-int',25));
+            s.maxIntervalSec=Math.max(s.minIntervalSec,gi('p-max-int',45));
             s.detectNewProducts=gc('p-dnew');s.detectRestocks=gc('p-drestock');
             s.keywords=g('p-kw');s.ignoreList=g('p-ig');
             s.desiredQty=Math.max(1,gi('pu-qty',1));s.maxQty=Math.max(1,gi('pu-maxqty',1));
@@ -1330,7 +1346,7 @@
             const s=Store.settings();
             const sv=(id,v)=>{const e=document.getElementById(id);if(e)e.value=v;};
             const sc=(id,v)=>{const e=document.getElementById(id);if(e)e.checked=v;};
-            sv('p-interval',s.checkIntervalSec);sc('p-dnew',s.detectNewProducts);sc('p-drestock',s.detectRestocks);
+            sv('p-min-int',s.minIntervalSec);sv('p-max-int',s.maxIntervalSec);sc('p-dnew',s.detectNewProducts);sc('p-drestock',s.detectRestocks);
             sv('p-kw',s.keywords);sv('p-ig',s.ignoreList);
             sv('pu-qty',s.desiredQty);sv('pu-maxqty',s.maxQty);sv('pu-mode',s.purchaseMode);sc('pu-confirm',s.requireConfirmation);
             sc('s-debug',s.debugLogging);sc('s-n-new',s.notifyNewProduct);sc('s-n-rs',s.notifyRestock);
